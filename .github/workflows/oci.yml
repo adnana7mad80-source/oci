@@ -17,6 +17,7 @@ jobs:
         run: pip install -q oci-cli
       - name: Try to create the server
         run: |
+          set +e
           mkdir -p ~/.oci
           printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem && chmod 600 ~/.oci/key.pem
           printf '%s\n' "$OCI_CONFIG" | sed "s|^key_file=.*|key_file=$HOME/.oci/key.pem|" > ~/.oci/config
@@ -44,8 +45,8 @@ jobs:
               exit 0
             fi
             if echo "$OUT" | grep -qiE "out of host capacity|OutOfHostCapacity|LimitExceeded|TooManyRequests"; then
-              echo "$SHAPE: مشغول (Out of capacity)، سنعيد المحاولة بعد 10 دقائق"
+              echo "$SHAPE: مشغول (Out of capacity)، سنعيد المحاولة بعد 10 دقائق"; echo "$OUT" | grep -oE '"(code|message)": *"[^"]*"' | head -2
             else
-              echo "خطأ غير متوقع:"; echo "$OUT" | grep -oE '"(code|message)": *"[^"]*"' | head -3; exit 1
+              echo "خطأ غير متوقع:"; echo "$OUT" | grep -oE '"(code|message)": *"[^"]*"' | head -3
             fi
           done
