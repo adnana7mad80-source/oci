@@ -11,6 +11,7 @@ jobs:
       OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
       OCI_KEY: ${{ secrets.OCI_KEY }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      SUPPRESS_LABEL_WARNING: "True"
     steps:
       - name: Install OCI CLI
         run: pip install -q oci-cli
@@ -22,10 +23,9 @@ jobs:
           chmod 600 ~/.oci/config
           echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCWzsuEkoGOd0Rmj5v3jXH7qz6xVeJaiQXTbOm93oUIdQdS+skixX0jg4i5ioB9o/8uIeiTCfw9S+zPVl8PBBpbanh0ixAYtOaP0Ssqo7xaJw/aHezyyzt0E4twNw1rXUP/5zw7rWCylJpUZD8I4PRIyvsBbccv6unBWAKYSRx41xJoBtprSCETxvSOvUSWWIDYqcyEI2w1303obLIs5/b5GqvtUQOhXDlB3mrqi9zMVfmEDxWz4+SyqkxH6PGyIn6Rls8ttqtj+eiMxuKyLr1ih15xMdwwpEembR40BIz5vx1Q9qX3xx60F27S9x89Pk7RLZYVHDg+Hjtkr/4XoPEYVk6OCeAhQxSV9E3DO9exuf393vFoIUoFlmIm4PLWd670Sp9s189pfCZOTFCBzBOfNd7EccctWjvuVNHgG4Qw4G+svhkYf3gfpvoYPhsSUDs1YEX6cY35We8CJaEUkjtgxQAftHeKS5OLZnkZG2ezfElFJ8rsvDx45IgeKTo0XQU= adnan-agent" > key.pub
           C=$(grep '^tenancy=' ~/.oci/config | cut -d= -f2)
-          echo "فحص: مفاتيح الـ config الموجودة: $(grep -oE '^(user|fingerprint|tenancy|region|key_file)=' ~/.oci/config | tr '\n' ' ')"
-          echo "فحص: أول سطر بالمفتاح: $(head -1 ~/.oci/key.pem | cut -c1-30) | عدد الأسطر: $(wc -l < ~/.oci/key.pem)"
-          N=$(oci compute instance list -c "$C" --display-name adnan-agent --all 2>err.txt | jq '[.data[]? | select(."lifecycle-state" != "TERMINATED")] | length') || N=""
-          if [ -z "$N" ]; then echo "خطأ بالاتصال مع Oracle:"; sed 's/ocid1[^" ]*/<ocid>/g' err.txt | head -c 500; exit 1; fi
+          oci compute instance list -c "$C" --display-name adnan-agent --all > out.json 2> err.txt; RC=$?
+          if [ $RC -ne 0 ] || grep -q "ServiceError" err.txt; then echo "خطأ بالاتصال مع Oracle:"; sed 's/ocid1[^" ]*/<ocid>/g' err.txt | grep -v "^Warning" | head -c 500; exit 1; fi
+          if [ -s out.json ]; then N=$(jq '[.data[]? | select(."lifecycle-state" != "TERMINATED")] | length' out.json); else N=0; fi
           if [ "$N" != "0" ]; then echo "السيرفر موجود أصلًا، لا حاجة لمحاولة جديدة"; exit 0; fi
           AD=$(oci iam availability-domain list -c "$C" | jq -r '.data[0].name')
           SUB=$(oci network subnet list -c "$C" --all | jq -r '[.data[] | select(."prohibit-public-ip-on-vnic" == false)][0].id')
