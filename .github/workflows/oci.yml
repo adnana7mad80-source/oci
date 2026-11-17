@@ -1,0 +1,49 @@
+name: oci-retry
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
+      OCI_KEY: ${{ secrets.OCI_KEY }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: Install OCI CLI
+        run: pip install -q oci-cli
+      - name: Try to create the server
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem && chmod 600 ~/.oci/key.pem
+          printf '%s\n' "$OCI_CONFIG" | sed "s|^key_file=.*|key_file=$HOME/.oci/key.pem|" > ~/.oci/config
+          chmod 600 ~/.oci/config
+          echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCWzsuEkoGOd0Rmj5v3jXH7qz6xVeJaiQXTbOm93oUIdQdS+skixX0jg4i5ioB9o/8uIeiTCfw9S+zPVl8PBBpbanh0ixAYtOaP0Ssqo7xaJw/aHezyyzt0E4twNw1rXUP/5zw7rWCylJpUZD8I4PRIyvsBbccv6unBWAKYSRx41xJoBtprSCETxvSOvUSWWIDYqcyEI2w1303obLIs5/b5GqvtUQOhXDlB3mrqi9zMVfmEDxWz4+SyqkxH6PGyIn6Rls8ttqtj+eiMxuKyLr1ih15xMdwwpEembR40BIz5vx1Q9qX3xx60F27S9x89Pk7RLZYVHDg+Hjtkr/4XoPEYVk6OCeAhQxSV9E3DO9exuf393vFoIUoFlmIm4PLWd670Sp9s189pfCZOTFCBzBOfNd7EccctWjvuVNHgG4Qw4G+svhkYf3gfpvoYPhsSUDs1YEX6cY35We8CJaEUkjtgxQAftHeKS5OLZnkZG2ezfElFJ8rsvDx45IgeKTo0XQU= adnan-agent" > key.pub
+          C=$(grep '^tenancy=' ~/.oci/config | cut -d= -f2)
+          N=$(oci compute instance list -c "$C" --display-name adnan-agent --all 2>/dev/null | jq '[.data[]? | select(."lifecycle-state" != "TERMINATED")] | length') || N=""
+          if [ -z "$N" ]; then echo "خطأ بالاتصال مع Oracle: راجع OCI_CONFIG و OCI_KEY"; exit 1; fi
+          if [ "$N" != "0" ]; then echo "السيرفر موجود أصلًا، لا حاجة لمحاولة جديدة"; exit 0; fi
+          AD=$(oci iam availability-domain list -c "$C" | jq -r '.data[0].name')
+          SUB=$(oci network subnet list -c "$C" --all | jq -r '[.data[] | select(."prohibit-public-ip-on-vnic" == false)][0].id')
+          IMG=$(oci compute image list -c "$C" --operating-system "Canonical Ubuntu" --operating-system-version "22.04" --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC | jq -r '.data[0].id')
+          for v in AD SUB IMG; do
+            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then echo "ما لقيت $v. إذا SUB: أنشئ VCN بـ Start VCN Wizard (with Internet Connectivity)"; exit 1; fi
+          done
+          for SHAPE in '{"ocpus":4,"memoryInGBs":24}' '{"ocpus":2,"memoryInGBs":12}'; do
+            OUT=$(oci compute instance launch --availability-domain "$AD" -c "$C" --shape VM.Standard.A1.Flex --shape-config "$SHAPE" --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true --ssh-authorized-keys-file key.pub --boot-volume-size-in-gbs 100 --display-name adnan-agent 2>&1)
+            ID=$(echo "$OUT" | jq -r '.data.id // empty' 2>/dev/null)
+            if [ -n "$ID" ]; then
+              echo "تم إنشاء السيرفر ($SHAPE)"
+              sleep 90
+              IP=$(oci compute instance list-vnics --instance-id "$ID" 2>/dev/null | jq -r '.data[0]["public-ip"]')
+              curl -s -d "تم إنشاء سيرفر Oracle! الـ IP: $IP" "ntfy.sh/$NTFY_TOPIC" > /dev/null
+              exit 0
+            fi
+            if echo "$OUT" | grep -qiE "out of host capacity|OutOfHostCapacity|LimitExceeded|TooManyRequests"; then
+              echo "$SHAPE: مشغول (Out of capacity)، سنعيد المحاولة بعد 10 دقائق"
+            else
+              echo "خطأ غير متوقع:"; echo "$OUT" | grep -oE '"(code|message)": *"[^"]*"' | head -3; exit 1
+            fi
+          done
